@@ -379,19 +379,3 @@ class GRPOArgumentsMixin(RolloutTrainerArgumentsMixin):
     # and mask sequences where this delta > threshold AND advantage < 0
     # Falls back to old_per_token_logps if rollout_per_token_logps is not available
     off_policy_sequence_mask_delta: Optional[float] = None
-
-    # ========== 新增: KL-Cov 和 Clip-Cov 参数 ========== 2026.3.18 by yans2
-     # 损失类型: grpo, dr_grpo, dapo, kl_cov, clip_cov
-    loss_type: str = "grpo"
-    # KL-Cov 参数
-    # 选择高协方差token的百分比 (默认20%)
-    k_percent: float = 0.2
-    # KL系数，用于KL-Cov方法
-    ppo_kl_coef: float = 1.0
-    # Clip-Cov 参数
-    # 协方差下界，低于此值的token不进行特殊处理
-    clip_cov_lb: float = 1.0
-    # 协方差上界，高于此值的token不进行特殊处理
-    clip_cov_ub: float = 5.0
-    # 采样比例，用于Clip-Cov
-    clip_cov_ratio: float = 0.0002

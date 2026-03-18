@@ -81,140 +81,6 @@ if is_swanlab_available():
     import swanlab
 
 
-# ========== The Entropy Mechanism of Reinforcement Learning for Reasoning Language Models  @yans2==========
-def compute_kl_cov_loss(
-    per_token_logps: torch.Tensor,
-    old_per_token_logps: torch.Tensor,
-    advantages: torch.Tensor,
-    completion_mask: torch.Tensor,
-    k_percent: float = 0.2,
-    ppo_kl_coef: float = 1.0,
-) -> torch.Tensor:
-    """
-    KL-Cov损失计算
-    
-    核心思想: 对高协方差token添加KL惩罚来限制更新幅度
-    
-    Args:
-        per_token_logps: 新策略的对数概率
-        old_per_token_logps: 旧策略的对数概率
-        advantages: 优势函数值
-        completion_mask: 完成掩码
-        k_percent: 高协方差token的百分比
-        ppo_kl_coef: KL系数
-    
-    Returns:
-        损失张量
-    """
-    # 计算log ratio
-    log_ratio = per_token_logps - old_per_token_logps
-    ratio = torch.exp(log_ratio)
-    
-    # 计算KL散度 (绝对值)
-    abs_kl = log_ratio.abs()
-    
-    # 基础PG损失
-    pg_losses1 = -advantages.unsqueeze(1) * ratio
-    
-    # 对高协方差token添加KL惩罚
-    pg_losses_kl = pg_losses1 + ppo_kl_coef * abs_kl
-    
-    # 计算协方差: cov(advantage, log_prob)
-    valid_mask = completion_mask.bool()
-    adv_mean = (advantages.unsqueeze(1) * valid_mask).sum() / valid_mask.sum()
-    logp_mean = (per_token_logps * valid_mask).sum() / valid_mask.sum()
-    
-    adv_centered = advantages.unsqueeze(1) - adv_mean
-    logp_centered = per_token_logps - logp_mean
-    covariance = adv_centered * logp_centered * valid_mask.float()
-    
-    # 选择top-k%高协方差token
-    valid_cov = covariance[valid_mask]
-    k_num = max(1, int(len(valid_cov) * k_percent))
-    _, top_indices = torch.topk(valid_cov, k_num)
-    
-    # 创建掩码
-    high_cov_mask = torch.zeros_like(covariance, dtype=torch.bool)
-    high_cov_mask[valid_mask] = False
-    valid_indices = torch.where(valid_mask)[0]
-    high_cov_mask[valid_indices[top_indices]] = True
-    
-    # 应用KL惩罚
-    per_token_loss = torch.where(high_cov_mask, pg_losses_kl, pg_losses1)
-    
-    return per_token_loss
-
-
-def compute_clip_cov_loss(
-    per_token_logps: torch.Tensor,
-    old_per_token_logps: torch.Tensor,
-    advantages: torch.Tensor,
-    completion_mask: torch.Tensor,
-    epsilon_low: float = 0.2,
-    epsilon_high: float = 0.2,
-    clip_cov_lb: float = 1.0,
-    clip_cov_ub: float = 5.0,
-    clip_cov_ratio: float = 0.0002,
-) -> torch.Tensor:
-    """
-    Clip-Cov损失计算
-    
-    核心思想: 对高协方差token跳过clip操作，允许更自由的更新
-    
-    Args:
-        per_token_logps: 新策略的对数概率
-        old_per_token_logps: 旧策略的对数概率
-        advantages: 优势函数值
-        completion_mask: 完成掩码
-        epsilon_low: PPO clip下界
-        epsilon_high: PPO clip上界
-        clip_cov_lb: 协方差下界
-        clip_cov_ub: 协方差上界
-        clip_cov_ratio: 采样比例
-    
-    Returns:
-        损失张量
-    """
-    # 计算log ratio
-    log_ratio = per_token_logps - old_per_token_logps
-    ratio = torch.exp(log_ratio)
-    
-    # 计算协方差
-    valid_mask = completion_mask.bool()
-    adv_mean = (advantages.unsqueeze(1) * valid_mask).sum() / valid_mask.sum()
-    logp_mean = (per_token_logps * valid_mask).sum() / valid_mask.sum()
-    
-    adv_centered = advantages.unsqueeze(1) - adv_mean
-    logp_centered = per_token_logps - logp_mean
-    covariance = adv_centered * logp_centered * valid_mask.float()
-    
-    # 基础PG损失
-    coef_1 = ratio
-    coef_2 = torch.clamp(ratio, 1 - epsilon_low, 1 + epsilon_high)
-    
-    pg_loss1 = -coef_1 * advantages.unsqueeze(1)
-    pg_loss2 = -coef_2 * advantages.unsqueeze(1)
-    
-    # 初始化clip掩码 (1表示需要clip，0表示跳过clip)
-    clip_mask = torch.ones_like(ratio)
-    
-    # 选择协方差在[lb, ub]范围内的token
-    cov_in_range = (covariance > clip_cov_lb) & (covariance < clip_cov_ub) & valid_mask
-    
-    # 随机选择一部分进行clip (模拟原始实现)
-    if cov_in_range.any():
-        cov_in_range_flat = cov_in_range.flatten()
-        num_to_mask = max(1, int(cov_in_range.sum().item() * clip_cov_ratio))
-        indices = torch.randperm(cov_in_range.sum().item())[:num_to_mask]
-        masked_indices = torch.where(cov_in_range_flat)[0][indices]
-        clip_mask.view(-1)[masked_indices] = 0
-    
-    # 应用clip掩码
-    per_token_loss = torch.maximum(pg_loss1, pg_loss2) * clip_mask + pg_loss1 * (1 - clip_mask)
-    
-    return per_token_loss
-
-
 class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
 
@@ -1344,36 +1210,6 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
             per_token_loss1 = coef_1 * advantages.unsqueeze(1)
             per_token_loss2 = coef_2 * advantages.unsqueeze(1)
             per_token_loss = -torch.min(per_token_loss1, per_token_loss2)
-
-        
-        # ========== 新增: KL-Cov 和 Clip-Cov 损失计算 @yans2==========
-        
-        elif self.loss_type == 'kl_cov':
-            # KL-Cov: 对高协方差token添加KL惩罚
-            per_token_loss = compute_kl_cov_loss(
-                per_token_logps=per_token_logps,
-                old_per_token_logps=old_per_token_logps,
-                advantages=advantages,
-                completion_mask=completion_mask,
-                k_percent=self.args.k_percent,
-                ppo_kl_coef=self.args.ppo_kl_coef,
-            )
-        
-        elif self.loss_type == 'clip_cov':
-            # Clip-Cov: 对高协方差token跳过clip
-            per_token_loss = compute_clip_cov_loss(
-                per_token_logps=per_token_logps,
-                old_per_token_logps=old_per_token_logps,
-                advantages=advantages,
-                completion_mask=completion_mask,
-                epsilon_low=self.epsilon_low,
-                epsilon_high=self.epsilon_high,
-                clip_cov_lb=self.args.clip_cov_lb,
-                clip_cov_ub=self.args.clip_cov_ub,
-                clip_cov_ratio=self.args.clip_cov_ratio,
-            )
-        # ====================
-
         if entropy_mask is not None:
             per_token_loss = per_token_loss * entropy_mask
         if per_token_kl is not None:
@@ -1408,13 +1244,6 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
             # CISPO and DAPO: Normalize by total completion tokens across all processes
             normalizer = inputs['num_items_in_batch'] / self.accelerator.num_processes
             loss = (per_token_loss * completion_mask).sum() / normalizer
-
-        # ========== 新增: KL-Cov 和 Clip-Cov 归一化  @yans2==========
-        
-        elif self.loss_type in ['kl_cov', 'clip_cov']:
-            # 使用与GRPO相同的归一化方式
-            loss = ((per_token_loss * completion_mask).sum(-1) / completion_mask.sum(-1).clamp(min=1.0)).mean()
-        # ====================
         else:
             raise ValueError(f'Unknown loss type: {self.loss_type}')
 
